@@ -41,8 +41,13 @@ export class RateLimiter {
    * @en Waits until enough tokens are available and consumes them.
    * @ru Ждёт появления достаточного числа токенов и потребляет их.
    */
-  async wait(tokensNeeded = 1): Promise<void> {
+  async wait(tokensNeeded = 1, signal?: AbortSignal): Promise<void> {
     if (!this.enabled) return;
+
+    // Если запрос УЖЕ отменён, даже не встаём в очередь
+    if (signal?.aborted) {
+      throw new DOMException("The user aborted a request.", "AbortError");
+    }
 
     tokensNeeded = tokensNeeded | 0;
     if (tokensNeeded < 1) tokensNeeded = 1;
@@ -64,8 +69,24 @@ export class RateLimiter {
         node.resolve = resolve;
         node.reject = reject;
         node.next = null;
+        node.cancelled = false;
       } else {
-        node = { tokensNeeded, resolve, reject, next: null };
+        node = { tokensNeeded, resolve, reject, next: null, cancelled: false };
+      }
+
+      if (signal) {
+        const onAbort = () => {
+          node.cancelled = true;
+          reject(new DOMException("The user aborted a request.", "AbortError"));
+          signal.removeEventListener("abort", onAbort);
+        };
+        signal.addEventListener("abort", onAbort);
+
+        const originalResolve = node.resolve;
+        node.resolve = () => {
+          signal.removeEventListener("abort", onAbort);
+          originalResolve();
+        };
       }
 
       if (this.tail !== null) {
@@ -129,6 +150,13 @@ export class RateLimiter {
 
     while (this.head !== null) {
       const next = this.head;
+
+      if (next.cancelled) {
+        this.head = next.next;
+        if (this.head === null) this.tail = null;
+        this.releaseNode(next);
+        continue;
+      }
 
       if (this.tokens < next.tokensNeeded) {
         break;

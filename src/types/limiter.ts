@@ -22,4 +22,5 @@ export type WaiterNode = {
   resolve: () => void;
   reject: (reason?: unknown) => void;
   next: WaiterNode | null;
+  cancelled?: boolean;
 };
