@@ -1,4 +1,4 @@
-import type { RateLimitOptions, WaiterNode } from "../types/limiter";
+import type { RateLimitOptions, WaiterNode } from "../types/limiter.js";
 
 /**
  * @class RateLimiter
@@ -41,10 +41,9 @@ export class RateLimiter {
    * @en Waits until enough tokens are available and consumes them.
    * @ru Ждёт появления достаточного числа токенов и потребляет их.
    */
-  async wait(tokensNeeded = 1, signal?: AbortSignal): Promise<void> {
-    if (!this.enabled) return;
+  wait(tokensNeeded = 1, signal?: AbortSignal): Promise<void> | null {
+    if (!this.enabled) return null;
 
-    // Если запрос УЖЕ отменён, даже не встаём в очередь
     if (signal?.aborted) {
       throw new DOMException("The user aborted a request.", "AbortError");
     }
@@ -57,7 +56,7 @@ export class RateLimiter {
 
     if (this.head === null && this.tokens >= tokensNeeded) {
       this.tokens -= tokensNeeded;
-      return;
+      return null;
     }
 
     return new Promise<void>((resolve, reject) => {
@@ -77,6 +76,10 @@ export class RateLimiter {
       if (signal) {
         const onAbort = () => {
           node.cancelled = true;
+          if (this.head === node) {
+            this.clearTimer();
+            this.drainQueue();
+          }
           reject(new DOMException("The user aborted a request.", "AbortError"));
           signal.removeEventListener("abort", onAbort);
         };
@@ -131,11 +134,7 @@ export class RateLimiter {
 
     if (elapsedMs > 0) {
       this.tokens += elapsedMs * this.refillRate;
-
-      if (this.tokens > this.max) {
-        this.tokens = this.max;
-      }
-
+      if (this.tokens > this.max) this.tokens = this.max;
       this.lastRefill = now;
     }
   }
@@ -163,11 +162,8 @@ export class RateLimiter {
       }
 
       this.tokens -= next.tokensNeeded;
-
       this.head = next.next;
-      if (this.head === null) {
-        this.tail = null;
-      }
+      if (this.head === null) this.tail = null;
 
       next.resolve();
       this.releaseNode(next);
@@ -188,15 +184,26 @@ export class RateLimiter {
     }
   }
 
-  /**
-   * @en Schedules the next queue drain based on the next token refill time.
-   * @ru Планирует следующий проход по очереди с учётом времени до следующего токена.
-   */
+  private clearTimer(): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+
   private scheduleDrain(): void {
-    if (this.timer !== null || this.head === null) return;
+    if (this.timer !== null) return;
+
+    while (this.head !== null && this.head.cancelled) {
+      const next = this.head;
+      this.head = next.next;
+      if (this.head === null) this.tail = null;
+      this.releaseNode(next);
+    }
+
+    if (this.head === null) return;
 
     const needed = this.head.tokensNeeded - this.tokens;
-
     if (needed <= 0) {
       this.drainQueue();
       return;
@@ -205,12 +212,7 @@ export class RateLimiter {
     let waitMs = needed / this.refillRate;
     waitMs = (waitMs | 0) + (waitMs % 1 > 0 ? 1 : 0);
 
-    this.timer = setTimeout(
-      () => {
-        this.drainQueue();
-      },
-      waitMs < 1 ? 1 : waitMs,
-    );
+    this.timer = setTimeout(() => this.drainQueue(), waitMs < 1 ? 1 : waitMs);
   }
 
   get remainingRequests(): number {
@@ -229,7 +231,6 @@ export class RateLimiter {
   get timeToReset(): number {
     if (!this.enabled) return 0;
     this.refill();
-
     if (this.tokens >= 1) return 0;
 
     const deficit = 1 - this.tokens;
@@ -239,24 +240,21 @@ export class RateLimiter {
 
   reset(): void {
     const error = new Error("Rate limiter has been reset");
-
     let current = this.head;
     this.head = null;
     this.tail = null;
 
     while (current !== null) {
       const next = current.next;
-      current.reject(error);
+      if (!current.cancelled) {
+        current.reject(error);
+      }
       this.releaseNode(current);
       current = next;
     }
 
     this.tokens = this.max;
     this.lastRefill = Date.now();
-
-    if (this.timer !== null) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
+    this.clearTimer();
   }
 }
