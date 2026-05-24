@@ -22,6 +22,7 @@ export class RateLimiter {
   private readonly maxPoolSize = 10000;
 
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private lockedUntil = 0;
 
   constructor(config?: RateLimitOptions) {
     this.enabled = config?.enabled ?? false;
@@ -209,7 +210,14 @@ export class RateLimiter {
       return;
     }
 
+    const now = Date.now();
     let waitMs = needed / this.refillRate;
+
+    if (now < this.lockedUntil) {
+      const lockRemaining = this.lockedUntil - now;
+      if (lockRemaining > waitMs) waitMs = lockRemaining;
+    }
+
     waitMs = (waitMs | 0) + (waitMs % 1 > 0 ? 1 : 0);
 
     this.timer = setTimeout(() => this.drainQueue(), waitMs < 1 ? 1 : waitMs);
@@ -236,6 +244,19 @@ export class RateLimiter {
     const deficit = 1 - this.tokens;
     const waitMs = deficit / this.refillRate;
     return (waitMs | 0) + (waitMs % 1 > 0 ? 1 : 0);
+  }
+
+  /**
+   * @ru Принудительно блокирует лимитер на указанное время (например, при получении 429)
+   */
+  public penalize(durationMs: number): void {
+    if (!this.enabled) return;
+
+    this.tokens = 0;
+    this.lockedUntil = Date.now() + durationMs;
+
+    this.clearTimer();
+    this.scheduleDrain();
   }
 
   reset(): void {

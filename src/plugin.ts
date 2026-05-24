@@ -56,11 +56,24 @@ export function withRateLimit(
         try {
           const maybePromise = limiter.wait(1, req.signal);
 
+          const execute = () =>
+            next<T>(req).then((res) => {
+              if (res.status === 429) {
+                const retryAfter = res.headers.get("retry-after");
+                const delay = retryAfter
+                  ? parseInt(retryAfter, 10) * 1000
+                  : 2000;
+
+                limiter.penalize(delay);
+              }
+              return res;
+            });
+
           if (maybePromise === null) {
-            return next<T>(req);
+            return execute();
           }
 
-          return maybePromise.then(() => next<T>(req));
+          return maybePromise.then(execute);
         } catch (err) {
           return Promise.reject(err);
         }
