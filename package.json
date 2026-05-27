@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/ratelimit",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
@@ -16,14 +16,13 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-ratelimit.git"
   },
   "peerDependencies": {
-    "typescript": "^5",
-    "@hyperttp/core": "^1"
+    "@hyperttp/types": "^0.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "globals": "^17.6.0",
-    "typescript-eslint": "^8.59.4",
-    "@dirold2/dev-tools": "^1.0.12",
+    "typescript-eslint": "^8.60.0",
+    "@dirold2/dev-tools": "^1.0.16",
     "@types/bun": "latest",
     "@types/node": "latest",
     "typescript": "^6.0.3",
