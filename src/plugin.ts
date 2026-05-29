@@ -10,18 +10,38 @@ import { RateLimiter } from "./utils/RateLimiter.js";
 import type { RateLimitOptions } from "./types/limiter.js";
 
 declare module "@hyperttp/types" {
-  interface PluginContext {
-    rateLimiter?: RateLimiter;
-  }
-  interface HttpClientOptions {
+  interface HyperttpPluginsExtension {
     rateLimit?: RateLimitOptions & { enabled?: boolean };
   }
 
+  interface PluginContext {
+    rateLimiter?: RateLimiter;
+  }
+
   interface IHyperCore {
-    getStats?: () => Record<string, unknown> & { currentRateLimit?: number };
+    getStats?(): Record<string, unknown> & { currentRateLimit?: number };
   }
 }
 
+/**
+ * @en Retrieves a header value from headers object, supporting both Map and plain object.
+ * @ru Получает заголовок из объекта headers, поддерживая и Map, и обычный объект.
+ */
+function getHeader(headers: any, name: string): string | string[] | undefined {
+  if (typeof headers?.get === "function") {
+    return headers.get(name);
+  }
+  return (
+    (headers as Record<string, string | string[] | undefined>)?.[
+      name.toLowerCase()
+    ] ?? (headers as Record<string, string | string[] | undefined>)?.[name]
+  );
+}
+
+/**
+ * @en Creates a plugin for request rate limiting.
+ * @ru Создаёт плагин для ограничения скорости запросов (rate limiting).
+ */
 export function withRateLimit(
   options?: Partial<RateLimitOptions>,
 ): HyperPlugin {
@@ -29,14 +49,23 @@ export function withRateLimit(
 
   return {
     name: "hyperttp-ratelimit",
+
+    /**
+     * @en Determines if the plugin is enabled based on client configuration.
+     * @ru Определяет, включён ли плагин на основе конфигурации клиента.
+     */
     enabled: (config: HttpClientOptions): boolean =>
       !!config.rateLimit?.enabled,
 
+    /**
+     * @en Initializes RateLimiter and extends getStats for statistics.
+     * @ru Инициализирует RateLimiter и расширяет getStats для статистики.
+     */
     setup(
       ctx: PluginContext & { core?: IHyperCore; config: HttpClientOptions },
     ): void {
       const finalOptions = {
-        ...ctx.config?.rateLimit,
+        ...ctx.config.rateLimit,
         ...options,
         enabled: true,
       } as RateLimitOptions;
@@ -47,7 +76,7 @@ export function withRateLimit(
       if (ctx.core && typeof ctx.core.getStats === "function") {
         const originalGetStats = ctx.core.getStats;
 
-        ctx.core.getStats = function (this: unknown) {
+        ctx.core.getStats = function (this: IHyperCore) {
           const stats = originalGetStats.call(this);
           if (stats) {
             stats.currentRateLimit = limiter.currentCount ?? 0;
@@ -58,9 +87,8 @@ export function withRateLimit(
     },
 
     /**
-     * @ru Перехватчик фазы запроса. Приостанавливает выполнение конвейера, если превышены лимиты (Throttling).
-     * @en Request phase interceptor. Suspends pipeline progression if limits are reached (Throttling).
-     * @param req - Contextual internal request options.
+     * @en Throttles request pipeline progression if bucket limits are hit.
+     * @ru Задерживает выполнение запроса, если превышены лимиты (Throttling).
      */
     async onRequest(req: InternalRequest): Promise<void> {
       const maybePromise = limiter.wait(1, req.signal);
@@ -70,21 +98,12 @@ export function withRateLimit(
     },
 
     /**
-     * @ru Перехватчик фазы успешного ответа. Анализирует код 429 и накладывает временной штраф на отправку последующих запросов.
-     * @en Response phase interceptor. Evaluates 429 codes and inflicts temporary cooldown penalties on subsequent flights.
-     * @param res - Output HTTP client response reference.
+     * @en Intercepts successful responses. Inflicts cooling penalty on upstream 429 status.
+     * @ru Перехватывает успешные ответы. При статусе 429 накладывает штрафной таймаут.
      */
     onResponse(res: HttpResponse<unknown>): void {
       if (res.status === 429) {
-        const retryAfterHeader =
-          typeof res.headers?.get === "function"
-            ? res.headers.get("retry-after")
-            : ((res.headers as Record<string, string | string[] | undefined>)?.[
-                "retry-after"
-              ] ??
-              (res.headers as Record<string, string | string[] | undefined>)?.[
-                "Retry-After"
-              ]);
+        const retryAfterHeader = getHeader(res.headers, "retry-after");
 
         const retryAfter = Array.isArray(retryAfterHeader)
           ? retryAfterHeader[0]
@@ -96,9 +115,8 @@ export function withRateLimit(
     },
 
     /**
-     * @ru Перехватчик ошибок конвейера. Дублирует логику штрафа, если сетевой сбой из-за 429 статус-кода был выброшен в виде исключения.
-     * @en Error phase interceptor. Duplicates penalization logic if a 429 failure was dispatched as a thrown exception.
-     * @param err - Intercepted runtime exception container.
+     * @en Duplicates cooling penalty logic if a 429 error is delivered via thrown exception.
+     * @ru Дублирует логику штрафа, если 429 ошибка прилетела в виде исключения (HTTP Error).
      */
     onError(err: unknown): void {
       const errTarget = err as Record<string, unknown> | null;
@@ -111,21 +129,11 @@ export function withRateLimit(
         let delay = 2000;
 
         if (response?.headers) {
-          const retryAfterHeader =
-            typeof response.headers.get === "function"
-              ? response.headers.get("retry-after")
-              : (
-                  response.headers as Record<
-                    string,
-                    string | string[] | undefined
-                  >
-                )?.["retry-after"];
+          const retryAfter = getHeader(response.headers, "retry-after");
 
-          const retryAfter = Array.isArray(retryAfterHeader)
-            ? retryAfterHeader[0]
-            : retryAfterHeader;
-          if (retryAfter) {
-            delay = parseInt(retryAfter, 10) * 1000;
+          const val = Array.isArray(retryAfter) ? retryAfter[0] : retryAfter;
+          if (val) {
+            delay = parseInt(val, 10) * 1000;
           }
         }
 

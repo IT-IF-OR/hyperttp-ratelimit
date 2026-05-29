@@ -6,6 +6,14 @@
   "files": [
     "dist"
   ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./dist/package.json"
+  },
   "keywords": [
     "hyperttp"
   ],
@@ -16,7 +24,7 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-ratelimit.git"
   },
   "peerDependencies": {
-    "@hyperttp/types": "^0.1.1"
+    "@hyperttp/types": "^0.1.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

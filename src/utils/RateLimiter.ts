@@ -1,40 +1,26 @@
 import type { RateLimitOptions, WaiterNode } from "../types/limiter.js";
 
 /**
- * @class RateLimiter
- * @en Token bucket rate limiter with a high-performance FIFO wait queue and object pooling.
- * @ru Ограничитель интенсивности (Rate Limiter) на базе алгоритма Token Bucket с FIFO-очередью и пулом объектов.
+ * @en High-performance token-bucket rate limiter with FIFO queue and object pooling.
+ * @ru Высокопроизводительный ограничитель скорости на основе токенов с FIFO-очередью и пулом объектов.
  */
 export class RateLimiter {
-  /** @private */
   private readonly enabled: boolean;
-  /** @private */
   private readonly max: number;
-  /** @private */
   private readonly window: number;
-  /** @private */
   private readonly refillRate: number;
 
-  /** @private */
   private tokens: number;
-  /** @private */
   private lastRefill: number;
 
-  /** @private */
   private head: WaiterNode | null = null;
-  /** @private */
   private tail: WaiterNode | null = null;
 
-  /** @private */
   private pool: WaiterNode[] = [];
-  /** @private */
   private poolSize = 0;
-  /** @private */
   private readonly maxPoolSize = 10000;
 
-  /** @private */
   private timer: ReturnType<typeof setTimeout> | null = null;
-  /** @private */
   private lockedUntil = 0;
 
   constructor(config?: RateLimitOptions) {
@@ -52,12 +38,11 @@ export class RateLimiter {
   }
 
   /**
-   * @ru Запрашивает токены на выполнение операции. Если лимиты исчерпаны, возвращает Promise,
-   * который разрешится, когда bucket пополнится до нужного объема.
-   * @en Requests execution tokens. If limits are exhausted, returns a Promise
-   * that resolves once the bucket accumulates the required capacity.
-   * @param tokensNeeded - Number of tokens to consume (defaults to 1).
-   * @param signal - Optional AbortSignal to cancel pending queue state.
+   * @en Waits until enough tokens are available to proceed. Returns a promise if queued, or null if immediate.
+   * @ru Ожидает появления достаточного количества токенов для продолжения. Возвращает обещание, если запрос в очереди, или null, если немедленно.
+   * @param tokensNeeded - Number of tokens required for this operation.
+   * @param signal - Optional abort signal to cancel the wait.
+   * @returns A promise resolving when tokens are available, or null if allowed immediately.
    */
   public wait(tokensNeeded = 1, signal?: AbortSignal): Promise<void> | null {
     if (!this.enabled) return null;
@@ -94,18 +79,20 @@ export class RateLimiter {
       if (signal) {
         const onAbort = () => {
           node.cancelled = true;
+
           if (this.head === node) {
             this.clearTimer();
-            this.drainQueue();
+            this.scheduleDrain();
           }
+
           if (node.reject) {
             node.reject(
               new DOMException("The user aborted a request.", "AbortError"),
             );
           }
-          signal.removeEventListener("abort", onAbort);
         };
-        signal.addEventListener("abort", onAbort);
+
+        signal.addEventListener("abort", onAbort, { once: true });
 
         const originalResolve = node.resolve;
         node.resolve = () => {
@@ -126,10 +113,10 @@ export class RateLimiter {
   }
 
   /**
-   * @ru Пытается немедленно потребить указанное число токенов без ожидания в очереди.
-   * @en Attempts to consume the specified amount of tokens immediately without queueing.
-   * @param tokensNeeded - Target allocation size.
-   * @returns Successful consumption confirmation indicator.
+   * @en Attempts to consume tokens immediately without waiting.
+   * @ru Пытается немедленно потребить токены без ожидания.
+   * @param tokensNeeded - Number of tokens to consume.
+   * @returns True if tokens were consumed successfully, false otherwise.
    */
   public tryConsume(tokensNeeded = 1): boolean {
     if (!this.enabled) return true;
@@ -149,9 +136,9 @@ export class RateLimiter {
   }
 
   /**
+   * @en Refills tokens based on elapsed time since last refill.
+   * @ru Пополняет токены на основе времени, прошедшего с последнего пополнения.
    * @private
-   * @ru Пересчитывает баланс токенов в корзине на основе дельты времени.
-   * @en Evaluates and applies granular token replenishment based on time elapsed.
    */
   private refill(): void {
     const now = Date.now();
@@ -165,9 +152,9 @@ export class RateLimiter {
   }
 
   /**
+   * @en Processes the FIFO queue, resolving promises for requests that can now proceed.
+   * @ru Обрабатывает FIFO-очередь, разрешая обещания для запросов, которые теперь могут выполниться.
    * @private
-   * @ru Продвигает очередь ожидания, разрешая промисы по мере пополнения пула токенов.
-   * @en Progresses the waiting queue, resolving pending hooks as token volume recovers.
    */
   private drainQueue(): void {
     this.timer = null;
@@ -201,9 +188,10 @@ export class RateLimiter {
   }
 
   /**
+   * @en Returns a waiter node to the object pool for reuse.
+   * @ru Возвращает узел ожидания в пул объектов для повторного использования.
+   * @param node - The node to release.
    * @private
-   * @ru Зануляет ссылки внутри ноды и возвращает её в пул для повторного использования.
-   * @en Flushes active closures from the node structure and returns it to the recycle array.
    */
   private releaseNode(node: WaiterNode): void {
     node.resolve = null;
@@ -216,9 +204,9 @@ export class RateLimiter {
   }
 
   /**
+   * @en Clears the scheduled drain timer.
+   * @ru Очищает запланированный таймер обработки очереди.
    * @private
-   * @ru Сбрасывает текущий активный таймер планировщика сброса очереди.
-   * @en Clears out the current active timer instance guiding pipeline drainage.
    */
   private clearTimer(): void {
     if (this.timer !== null) {
@@ -228,9 +216,9 @@ export class RateLimiter {
   }
 
   /**
+   * @en Schedules the next queue drain execution based on token availability.
+   * @ru Планирует следующее выполнение обработки очереди на основе доступности токенов.
    * @private
-   * @ru Вычисляет необходимое время ожидания для головной ноды очереди и заводит таймер.
-   * @en Estimates delay step required by the leading queue node and provisions the scheduling task.
    */
   private scheduleDrain(): void {
     if (this.timer !== null) return;
@@ -264,8 +252,8 @@ export class RateLimiter {
   }
 
   /**
-   * @ru Количество доступных запросов (целых токенов), оставшихся в корзине на текущий момент.
-   * @en Total integer token units currently available inside the bucket.
+   * @en Returns the number of remaining available tokens.
+   * @ru Возвращает количество оставшихся доступных токенов.
    */
   public get remainingRequests(): number {
     if (!this.enabled) return Number.POSITIVE_INFINITY;
@@ -274,8 +262,8 @@ export class RateLimiter {
   }
 
   /**
-   * @ru Текущее количество израсходованных токенов в текущем временном окне.
-   * @en The count of consumed tokens out of the max limit in the current frame.
+   * @en Returns the number of currently consumed tokens (active load).
+   * @ru Возвращает количество текущих потребленных токенов (активная нагрузка).
    */
   public get currentCount(): number {
     if (!this.enabled) return 0;
@@ -285,8 +273,8 @@ export class RateLimiter {
   }
 
   /**
-   * @ru Время (в мс) до момента, когда в корзине появится хотя бы один целый токен.
-   * @en Remaining delay (ms) until at least one integer token capacity slot is fully regenerated.
+   * @en Returns the estimated time in milliseconds until at least one token is available.
+   * @ru Возвращает предполагаемое время в миллисекундах до появления хотя бы одного токена.
    */
   public get timeToReset(): number {
     if (!this.enabled) return 0;
@@ -299,11 +287,9 @@ export class RateLimiter {
   }
 
   /**
-   * @ru Принудительно обнуляет токены и блокирует обработку на штрафной интервал.
-   * Полезно при получении внешнего ответа 429 Too Many Requests со стороны upstream.
-   * @en Enforces full token starvation and suspends queue execution for a penalty frame duration.
-   * Useful when intercepting 429 Too Many Requests responses emitted from upstream endpoints.
-   * @param durationMs - Penalty cooling cooldown length.
+   * @en Penalizes the limiter by exhausting tokens and locking for a specified duration.
+   * @ru Накладывает штраф на ограничитель, исчерпывая токены и блокируя на указанное время.
+   * @param durationMs - Duration of the penalty lock in milliseconds.
    */
   public penalize(durationMs: number): void {
     if (!this.enabled) return;
@@ -316,8 +302,8 @@ export class RateLimiter {
   }
 
   /**
-   * @ru Сбрасывает состояние лимитера, отклоняя все ожидающие в очереди запросы с ошибкой.
-   * @en Flushes core limiter variables, rejecting all stacked pipeline wait nodes with an error.
+   * @en Resets the limiter, clearing the queue and restoring full token capacity.
+   * @ru Сбрасывает ограничитель, очищая очередь и восстанавливая полную емкость токенов.
    */
   public reset(): void {
     const error = new Error("Rate limiter has been reset");
