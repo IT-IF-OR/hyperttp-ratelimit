@@ -1,3 +1,24 @@
+import type { RequestContext, SendRequest, UniversalResponse } from "@hyperttp/types";
+
+export type PenaltyDecision = number | false | null | undefined;
+
+export type RequestWeightCallback = (
+  request: SendRequest,
+  ctx?: RequestContext,
+) => number | Promise<number>;
+
+export type ResponsePenaltyCallback = (
+  response: UniversalResponse,
+  request?: SendRequest,
+  ctx?: RequestContext,
+) => PenaltyDecision | Promise<PenaltyDecision>;
+
+export type ErrorPenaltyCallback = (
+  error: unknown,
+  request?: SendRequest,
+  ctx?: RequestContext,
+) => PenaltyDecision | Promise<PenaltyDecision>;
+
 /**
  * @en Setup options guiding rate-limiting plugin behaviour.
  * @ru Параметры конфигурации для модуля ограничения интенсивности.
@@ -20,6 +41,15 @@ export interface RateLimitOptions {
    * @ru Размер скользящего окна в миллисекундах для регенерации лимитов.
    */
   windowMs?: number;
+
+  /** Returns the token cost of a request. Defaults to one token. */
+  getRequestWeight?: RequestWeightCallback;
+
+  /** Returns a penalty duration in milliseconds, or a falsey decision for no penalty. */
+  getResponsePenalty?: ResponsePenaltyCallback;
+
+  /** Returns a penalty duration in milliseconds, or a falsey decision for no penalty. */
+  getErrorPenalty?: ErrorPenaltyCallback;
 }
 
 /**

@@ -1,144 +1,115 @@
 import type {
   HyperPlugin,
-  InternalRequest,
-  HttpClientOptions,
-  HttpResponse,
+  HyperClientOptions,
+  UniversalResponse,
   PluginContext,
+  SendRequest,
+  RequestContext,
   IHyperCore,
 } from "@hyperttp/types";
 import { RateLimiter } from "./utils/RateLimiter.js";
 import type { RateLimitOptions } from "./types/limiter.js";
 
 declare module "@hyperttp/types" {
-  interface HyperttpPluginsExtension {
-    rateLimit?: RateLimitOptions & { enabled?: boolean };
+  interface HyperClientOptions {
+    rateLimit?: RateLimitOptions;
   }
 
   interface PluginContext {
     rateLimiter?: RateLimiter;
   }
+}
 
-  interface IHyperCore {
-    getStats?(): Record<string, unknown> & { currentRateLimit?: number };
+function getHeader(
+  headers: Readonly<Record<string, string | string[]>> | undefined,
+  name: string,
+): string | string[] | undefined {
+  if (!headers) return undefined;
+  const lookup = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lookup) return value;
+  }
+  return undefined;
+}
+
+function retryAfterPenalty(response?: UniversalResponse): number {
+  const retryAfterHeader = response && getHeader(response.headers, "retry-after");
+  const retryAfter = Array.isArray(retryAfterHeader) ? retryAfterHeader[0] : retryAfterHeader;
+  const seconds = retryAfter ? Number.parseInt(retryAfter, 10) : Number.NaN;
+  return Number.isFinite(seconds) ? seconds * 1000 : 2000;
+}
+
+function defaultResponsePenalty(response: UniversalResponse): number | false {
+  return response.protocol === "rest" && response.status === 429
+    ? retryAfterPenalty(response)
+    : false;
+}
+
+function defaultErrorPenalty(error: unknown): number | false {
+  const target = error as Record<string, unknown> | null;
+  const response = target?.response as UniversalResponse | undefined;
+  const status = target?.status ?? target?.statusCode ?? response?.status;
+  if (status !== 429) return false;
+  if (response && response.protocol !== "rest") return false;
+  return retryAfterPenalty(response);
+}
+
+function applyPenalty(limiter: RateLimiter, decision: number | false | null | undefined): void {
+  if (typeof decision === "number" && Number.isFinite(decision) && decision >= 0) {
+    limiter.penalize(decision);
   }
 }
 
-/**
- * @en Retrieves a header value from headers object, supporting both Map and plain object.
- * @ru Получает заголовок из объекта headers, поддерживая и Map, и обычный объект.
- */
-function getHeader(headers: any, name: string): string | string[] | undefined {
-  if (typeof headers?.get === "function") {
-    return headers.get(name);
-  }
-  return (
-    (headers as Record<string, string | string[] | undefined>)?.[
-      name.toLowerCase()
-    ] ?? (headers as Record<string, string | string[] | undefined>)?.[name]
-  );
-}
-
-/**
- * @en Creates a plugin for request rate limiting.
- * @ru Создаёт плагин для ограничения скорости запросов (rate limiting).
- */
-export function withRateLimit(
-  options?: Partial<RateLimitOptions>,
-): HyperPlugin {
+export function withRateLimit(options?: Partial<RateLimitOptions>): HyperPlugin {
   let limiter: RateLimiter;
+  let finalOptions: RateLimitOptions;
 
   return {
     name: "hyperttp-ratelimit",
-
-    /**
-     * @en Determines if the plugin is enabled based on client configuration.
-     * @ru Определяет, включён ли плагин на основе конфигурации клиента.
-     */
-    enabled: (config: HttpClientOptions): boolean =>
-      !!config.rateLimit?.enabled,
-
-    /**
-     * @en Initializes RateLimiter and extends getStats for statistics.
-     * @ru Инициализирует RateLimiter и расширяет getStats для статистики.
-     */
-    setup(
-      ctx: PluginContext & { core?: IHyperCore; config: HttpClientOptions },
-    ): void {
-      const finalOptions = {
+    enabled: (config: HyperClientOptions): boolean => !!config.rateLimit?.enabled,
+    setup(ctx: PluginContext): void {
+      finalOptions = {
         ...ctx.config.rateLimit,
         ...options,
         enabled: true,
       } as RateLimitOptions;
 
       limiter = new RateLimiter(finalOptions);
-      ctx.rateLimiter = limiter;
+      const context = ctx as PluginContext & { rateLimiter?: RateLimiter };
+      context.rateLimiter = limiter;
 
-      if (ctx.core && typeof ctx.core.getStats === "function") {
-        const originalGetStats = ctx.core.getStats;
-
-        ctx.core.getStats = function (this: IHyperCore) {
-          const stats = originalGetStats.call(this);
-          if (stats) {
-            stats.currentRateLimit = limiter.currentCount ?? 0;
-          }
+      const core = ctx.core as IHyperCore & {
+        getStats?: () => Record<string, unknown> & {
+          currentRateLimit?: number;
+        };
+      };
+      if (typeof core.getStats === "function") {
+        const originalGetStats = core.getStats;
+        core.getStats = function () {
+          const stats = originalGetStats.call(core);
+          if (stats) stats.currentRateLimit = limiter.currentCount;
           return stats;
         };
       }
     },
-
-    /**
-     * @en Throttles request pipeline progression if bucket limits are hit.
-     * @ru Задерживает выполнение запроса, если превышены лимиты (Throttling).
-     */
-    async onRequest(req: InternalRequest): Promise<void> {
-      const maybePromise = limiter.wait(1, req.signal);
-      if (maybePromise instanceof Promise) {
-        await maybePromise;
-      }
+    async onRequest(
+      req: SendRequest,
+      _ctx?: PluginContext,
+      reqCtx?: RequestContext,
+    ): Promise<void> {
+      const weight = finalOptions.getRequestWeight
+        ? await finalOptions.getRequestWeight(req, reqCtx)
+        : 1;
+      const maybePromise = limiter.wait(weight, req.signal ?? reqCtx?.signal);
+      if (maybePromise) await maybePromise;
     },
-
-    /**
-     * @en Intercepts successful responses. Inflicts cooling penalty on upstream 429 status.
-     * @ru Перехватывает успешные ответы. При статусе 429 накладывает штрафной таймаут.
-     */
-    onResponse(res: HttpResponse<unknown>): void {
-      if (res.status === 429) {
-        const retryAfterHeader = getHeader(res.headers, "retry-after");
-
-        const retryAfter = Array.isArray(retryAfterHeader)
-          ? retryAfterHeader[0]
-          : retryAfterHeader;
-        const delay = retryAfter ? parseInt(retryAfter, 10) * 1000 : 2000;
-
-        limiter.penalize(delay);
-      }
+    async onResponse(res, req, _ctx, reqCtx): Promise<void> {
+      const getPenalty = finalOptions.getResponsePenalty ?? defaultResponsePenalty;
+      applyPenalty(limiter, await getPenalty(res, req, reqCtx));
     },
-
-    /**
-     * @en Duplicates cooling penalty logic if a 429 error is delivered via thrown exception.
-     * @ru Дублирует логику штрафа, если 429 ошибка прилетела в виде исключения (HTTP Error).
-     */
-    onError(err: unknown): void {
-      const errTarget = err as Record<string, unknown> | null;
-      const statusCode = errTarget?.status ?? errTarget?.statusCode;
-
-      if (statusCode === 429) {
-        const response = errTarget?.response as
-          | HttpResponse<unknown>
-          | undefined;
-        let delay = 2000;
-
-        if (response?.headers) {
-          const retryAfter = getHeader(response.headers, "retry-after");
-
-          const val = Array.isArray(retryAfter) ? retryAfter[0] : retryAfter;
-          if (val) {
-            delay = parseInt(val, 10) * 1000;
-          }
-        }
-
-        limiter.penalize(delay);
-      }
+    async onError(err, req, _ctx, reqCtx): Promise<void> {
+      const getPenalty = finalOptions.getErrorPenalty ?? defaultErrorPenalty;
+      applyPenalty(limiter, await getPenalty(err, req, reqCtx));
     },
   };
 }

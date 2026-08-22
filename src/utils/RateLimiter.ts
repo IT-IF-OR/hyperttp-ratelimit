@@ -86,9 +86,7 @@ export class RateLimiter {
           }
 
           if (node.reject) {
-            node.reject(
-              new DOMException("The user aborted a request.", "AbortError"),
-            );
+            node.reject(new DOMException("The user aborted a request.", "AbortError"));
           }
         };
 
