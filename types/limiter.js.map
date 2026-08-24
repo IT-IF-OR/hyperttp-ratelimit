@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["limiter.js"],
+  "sourcesContent": ["export {};\n//# sourceMappingURL=limiter.js.map"],
+  "mappings": "aAAA",
+  "names": []
+}
