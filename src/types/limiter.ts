@@ -86,4 +86,7 @@ export interface WaiterNode {
    * @ru Флаг отмены/сброса задачи (например, по AbortSignal).
    */
   cancelled: boolean;
+
+  /** Removes resources associated with an optional abort signal. */
+  cleanup?: (() => void) | null;
 }

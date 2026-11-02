@@ -26,11 +26,11 @@ export class RateLimiter {
   constructor(config?: RateLimitOptions) {
     this.enabled = config?.enabled ?? false;
 
-    const maxReq = config?.maxRequests ? config.maxRequests | 0 : 100;
-    const winMs = config?.windowMs ? config.windowMs | 0 : 60_000;
+    const maxReq = config?.maxRequests ?? 100;
+    const winMs = config?.windowMs ?? 60_000;
 
-    this.max = maxReq < 1 ? 1 : maxReq;
-    this.window = winMs < 1 ? 1 : winMs;
+    this.max = Number.isFinite(maxReq) ? Math.max(1, Math.floor(maxReq)) : 100;
+    this.window = Number.isFinite(winMs) ? Math.max(1, Math.floor(winMs)) : 60_000;
 
     this.refillRate = this.max / this.window;
     this.tokens = this.max;
@@ -51,13 +51,11 @@ export class RateLimiter {
       throw new DOMException("The user aborted a request.", "AbortError");
     }
 
-    tokensNeeded = tokensNeeded | 0;
-    if (tokensNeeded < 1) tokensNeeded = 1;
-    if (tokensNeeded > this.max) tokensNeeded = this.max;
+    tokensNeeded = this.normalizeWeight(tokensNeeded);
 
     this.refill();
 
-    if (this.head === null && this.tokens >= tokensNeeded) {
+    if (Date.now() >= this.lockedUntil && this.head === null && this.tokens >= tokensNeeded) {
       this.tokens -= tokensNeeded;
       return null;
     }
@@ -79,24 +77,21 @@ export class RateLimiter {
       if (signal) {
         const onAbort = () => {
           node.cancelled = true;
+          node.reject?.(new DOMException("The user aborted a request.", "AbortError"));
+          node.cleanup?.();
+          node.cleanup = null;
+          node.resolve = null;
+          node.reject = null;
 
           if (this.head === node) {
             this.clearTimer();
             this.scheduleDrain();
           }
-
-          if (node.reject) {
-            node.reject(new DOMException("The user aborted a request.", "AbortError"));
-          }
         };
 
         signal.addEventListener("abort", onAbort, { once: true });
 
-        const originalResolve = node.resolve;
-        node.resolve = () => {
-          signal.removeEventListener("abort", onAbort);
-          if (originalResolve) originalResolve();
-        };
+        node.cleanup = () => signal.removeEventListener("abort", onAbort);
       }
 
       if (this.tail !== null) {
@@ -119,18 +114,21 @@ export class RateLimiter {
   public tryConsume(tokensNeeded = 1): boolean {
     if (!this.enabled) return true;
 
-    tokensNeeded = tokensNeeded | 0;
-    if (tokensNeeded < 1) tokensNeeded = 1;
-    if (tokensNeeded > this.max) tokensNeeded = this.max;
+    tokensNeeded = this.normalizeWeight(tokensNeeded);
 
     this.refill();
 
-    if (this.head === null && this.tokens >= tokensNeeded) {
+    if (Date.now() >= this.lockedUntil && this.head === null && this.tokens >= tokensNeeded) {
       this.tokens -= tokensNeeded;
       return true;
     }
 
     return false;
+  }
+
+  private normalizeWeight(value: number): number {
+    if (Number.isNaN(value)) return 1;
+    return Math.min(this.max, Math.max(1, Math.floor(value)));
   }
 
   /**
@@ -168,7 +166,7 @@ export class RateLimiter {
         continue;
       }
 
-      if (this.tokens < next.tokensNeeded) {
+      if (Date.now() < this.lockedUntil || this.tokens < next.tokensNeeded) {
         break;
       }
 
@@ -192,6 +190,8 @@ export class RateLimiter {
    * @private
    */
   private releaseNode(node: WaiterNode): void {
+    node.cleanup?.();
+    node.cleanup = null;
     node.resolve = null;
     node.reject = null;
     node.next = null;
@@ -230,23 +230,16 @@ export class RateLimiter {
 
     if (this.head === null) return;
 
+    this.refill();
     const needed = this.head.tokensNeeded - this.tokens;
-    if (needed <= 0) {
+    const waitMs = Math.ceil(Math.max(needed / this.refillRate, this.lockedUntil - Date.now(), 0));
+    if (waitMs <= 0) {
       this.drainQueue();
       return;
     }
 
-    const now = Date.now();
-    let waitMs = needed / this.refillRate;
-
-    if (now < this.lockedUntil) {
-      const lockRemaining = this.lockedUntil - now;
-      if (lockRemaining > waitMs) waitMs = lockRemaining;
-    }
-
-    waitMs = (waitMs | 0) + (waitMs % 1 > 0 ? 1 : 0);
-
-    this.timer = setTimeout(() => this.drainQueue(), waitMs < 1 ? 1 : waitMs);
+    // Node timers overflow above the signed 32-bit range; recheck long waits in chunks.
+    this.timer = setTimeout(() => this.drainQueue(), Math.min(waitMs, 2_147_483_647));
   }
 
   /**
@@ -256,7 +249,7 @@ export class RateLimiter {
   public get remainingRequests(): number {
     if (!this.enabled) return Number.POSITIVE_INFINITY;
     this.refill();
-    return this.tokens | 0;
+    return Date.now() < this.lockedUntil ? 0 : Math.floor(this.tokens);
   }
 
   /**
@@ -267,7 +260,7 @@ export class RateLimiter {
     if (!this.enabled) return 0;
     this.refill();
     const count = this.max - this.tokens;
-    return count < 0 ? 0 : count | 0;
+    return count < 0 ? 0 : Math.floor(count);
   }
 
   /**
@@ -277,11 +270,8 @@ export class RateLimiter {
   public get timeToReset(): number {
     if (!this.enabled) return 0;
     this.refill();
-    if (this.tokens >= 1) return 0;
-
-    const deficit = 1 - this.tokens;
-    const waitMs = deficit / this.refillRate;
-    return (waitMs | 0) + (waitMs % 1 > 0 ? 1 : 0);
+    const deficit = Math.max(0, 1 - this.tokens);
+    return Math.ceil(Math.max(deficit / this.refillRate, this.lockedUntil - Date.now(), 0));
   }
 
   /**
@@ -290,10 +280,12 @@ export class RateLimiter {
    * @param durationMs - Duration of the penalty lock in milliseconds.
    */
   public penalize(durationMs: number): void {
-    if (!this.enabled) return;
+    if (!this.enabled || !Number.isFinite(durationMs) || durationMs < 0) return;
 
+    const now = Date.now();
     this.tokens = 0;
-    this.lockedUntil = Date.now() + durationMs;
+    this.lastRefill = now;
+    this.lockedUntil = Math.max(this.lockedUntil, now + durationMs);
 
     this.clearTimer();
     this.scheduleDrain();
@@ -319,6 +311,7 @@ export class RateLimiter {
     }
 
     this.tokens = this.max;
+    this.lockedUntil = 0;
     this.lastRefill = Date.now();
     this.clearTimer();
   }

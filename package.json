@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/ratelimit",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -25,7 +25,7 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-ratelimit.git"
   },
   "peerDependencies": {
-    "@hyperttp/types": "^0.3.0"
+    "@hyperttp/types": "^0.4.2"
   },
   "devDependencies": {
     "@dirold2/dev-tools": "^1.1.3",
@@ -33,8 +33,8 @@
     "@types/node": "latest",
     "typescript": "^7.0.2",
     "vitest": "latest",
-    "oxfmt": "^0.65.0",
-    "oxlint": "^1.80.0",
+    "oxfmt": "^0.75.0",
+    "oxlint": "^1.90.0",
     "esbuild": "^0.28.2"
   },
   "scripts": {
