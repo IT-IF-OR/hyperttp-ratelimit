@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.0.0] - 2026-11-03
+
+- Require `@hyperttp/types@^0.5.0` and validate against the registry declarations.
+
 ## [2.0.2] - 2026-11-02
 
 ### Added
