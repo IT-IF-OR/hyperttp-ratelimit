@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/index.ts"],
+  "sourcesContent": ["export { withRateLimit } from \"./plugin.js\";\nexport * from \"./types/limiter.js\";\nexport * from \"./utils/RateLimiter.js\";\n"],
+  "mappings": "aAAA,OAAS,kBAAqB,cAC9B,WAAc,qBACd,WAAc",
+  "names": []
+}
